@@ -1,11 +1,17 @@
 [package]
 name = "rumd"
 version = "0.1.0"
-authors = ["Carlos L. Torres <cltorrespr@gmail.com>"]
+authors = ["Carlos L. Torres <cltorrespr+cargo@gmail.com>"]
 edition = "2018"
+repository = "https://github.com/meteorfox/rumd"
+license = "MIT"
+keywords = ["rumd", "ppsspp"]
 
 [dependencies]
 tokio = {version = "0.2", features = ["macros"] }
 warp = "0.2"
 log = "0.4"
 pretty_env_logger = "0.4"
+
+[profile.release]
+lto = "thin"
