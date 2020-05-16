@@ -1,6 +1,12 @@
 use std::env;
+use std::path::Path;
 
+use ignore::types::TypesBuilder;
+use ignore::WalkBuilder;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use warp::Filter;
+
+const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ');
 
 #[tokio::main]
 async fn main() {
@@ -11,13 +17,33 @@ async fn main() {
     }
     pretty_env_logger::init();
 
-    // TODO(meteorfox): Asynchronously scan directories recursively for *.iso files
-    // TODO(meteorfox): Validate that they are actually valid PSP ISO files
+    let mut builder = TypesBuilder::new();
+    builder.add("iso", "*.iso").unwrap();
+    builder.select("iso");
+    let matcher = builder.build().unwrap();
+
+    for result in WalkBuilder::new("/mnt/storage/games/psp")
+        .types(matcher)
+        .build()
+    {
+        match result {
+            Ok(entry) => {
+                let path: &Path = entry.path().strip_prefix("/mnt/storage/games/psp").unwrap();
+                println!("/{}", utf8_percent_encode(path.to_str().unwrap(), FRAGMENT));
+            }
+            Err(err) => println!("ERROR: {}", err),
+        }
+    }
+
+    // Must Have
     // TODO(meteorfox): Build KV "database" of flat ISO filenames map to their entry
     // TODO(meteorfox): Each entry contains file length info and file-system path
     // TODO(meteorfox): When reading a range of bytes, look up in KV database, check
     //                  range within limits, open file and read bytes, close file then
     //                  return bytes.
+
+    // Nice to Have
+    // TODO(meteorfox): Validate that they are actually valid PSP ISO files
     // TODO(meteorfox): Keep cache of chunks in memory, if necessary.
 
     let server_header = warp::reply::with::default_header("Server", "rumd v0.1.0");
@@ -43,8 +69,8 @@ mod filters {
         let isos = vec![
             "/",
             "/Crisis%20Core%20-%20Final%20Fantasy%20VII%20(USA).iso",
-            "Metal_Gear_Solid_Peace_Walker_USA_PSP-pSyPSP.iso",
-            "Monster%20Hunter%20Freedom%20Unite%20(USA)%20(En,Fr,De,Es,It).iso",
+            "/Metal_Gear_Solid_Peace_Walker_USA_PSP-pSyPSP.iso",
+            "/Monster%20Hunter%20Freedom%20Unite%20(USA)%20(En,Fr,De,Es,It).iso",
         ];
 
         warp::path::end()
@@ -55,7 +81,6 @@ mod filters {
     /// HEAD /<umd_name:string>
     pub fn umd_info() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path::param()
-            .and(warp::path::end())
             .and(warp::head())
             .map(|umd_name: String| {
                 log::debug!("info UMD: path={}", umd_name);
@@ -71,11 +96,8 @@ mod filters {
     /// GET /<umd_name:string>
     pub fn umd_read() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         let range_header = warp::header::<Range>("range");
-        warp::path::param()
-            .and(warp::path::end())
-            .and(warp::get())
-            .and(range_header)
-            .map(|umd_name: String, range: Range| {
+        warp::path::param().and(warp::get()).and(range_header).map(
+            |umd_name: String, range: Range| {
                 log::debug!(
                     "Read UMD: path={} range=bytes {}-{}",
                     umd_name,
@@ -92,7 +114,8 @@ mod filters {
                         format!("bytes {}-{}/{}", range.start, range.end, 1646002176),
                     )
                     .body(hyper::Body::empty())
-            })
+            },
+        )
     }
 
     #[derive(Debug, PartialEq)]
@@ -113,5 +136,30 @@ mod filters {
                 end: end_from_str,
             })
         }
+    }
+}
+
+mod rumd {}
+
+#[cfg(test)]
+mod tests {
+    use warp::http::StatusCode;
+    use warp::test::request;
+
+    use super::filters;
+
+    #[tokio::test]
+    async fn test_list() {
+        let api = filters::rumd();
+        let resp = request().method("GET").path("/").reply(&api).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.body(),
+            r#"/
+/Crisis%20Core%20-%20Final%20Fantasy%20VII%20(USA).iso
+/Metal_Gear_Solid_Peace_Walker_USA_PSP-pSyPSP.iso
+/Monster%20Hunter%20Freedom%20Unite%20(USA)%20(En,Fr,De,Es,It).iso"#
+        );
     }
 }
