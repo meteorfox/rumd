@@ -6,7 +6,11 @@ use ignore::WalkBuilder;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use warp::Filter;
 
+const ROOT_ISO_PATH: &str = "/mnt/storage/games/psp";
 const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ');
+
+const RUMD_LISTENING_PORT: u16 = 41041;
+const RUMD_VERSION: &str = "rumd v0.1.0";
 
 #[tokio::main]
 async fn main() {
@@ -22,13 +26,10 @@ async fn main() {
     builder.select("iso");
     let matcher = builder.build().unwrap();
 
-    for result in WalkBuilder::new("/mnt/storage/games/psp")
-        .types(matcher)
-        .build()
-    {
+    for result in WalkBuilder::new(ROOT_ISO_PATH).types(matcher).build() {
         match result {
             Ok(entry) => {
-                let path: &Path = entry.path().strip_prefix("/mnt/storage/games/psp").unwrap();
+                let path: &Path = entry.path().strip_prefix(ROOT_ISO_PATH).unwrap();
                 println!("/{}", utf8_percent_encode(path.to_str().unwrap(), FRAGMENT));
             }
             Err(err) => println!("ERROR: {}", err),
@@ -44,21 +45,23 @@ async fn main() {
 
     // Nice to Have
     // TODO(meteorfox): Validate that they are actually valid PSP ISO files
-    // TODO(meteorfox): Keep cache of chunks in memory, if necessary.
+    // TODO(meteorfox): Keep cache of blocks in memory, if necessary.
 
-    let server_header = warp::reply::with::default_header("Server", "rumd v0.1.0");
+    let server_header = warp::reply::with::default_header("Server", RUMD_VERSION);
 
     let api = filters::rumd();
 
     let routes = api.with(warp::log("rumd")).with(&server_header);
 
-    warp::serve(routes).run(([10, 0, 0, 184], 41041)).await;
+    warp::serve(routes)
+        .run(([10, 0, 0, 184], RUMD_LISTENING_PORT))
+        .await;
 }
 
 mod filters {
-    use std::num::ParseIntError;
-    use std::str::FromStr;
-    use warp::{http::Response, http::StatusCode, hyper, Filter};
+    use super::rumd;
+
+    use warp::Filter;
 
     pub fn rumd() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         umd_list().or(umd_info()).or(umd_read())
@@ -66,60 +69,80 @@ mod filters {
 
     /// GET /
     pub fn umd_list() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        let isos = vec![
-            "/",
-            "/Crisis%20Core%20-%20Final%20Fantasy%20VII%20(USA).iso",
-            "/Metal_Gear_Solid_Peace_Walker_USA_PSP-pSyPSP.iso",
-            "/Monster%20Hunter%20Freedom%20Unite%20(USA)%20(En,Fr,De,Es,It).iso",
-        ];
-
-        warp::path::end()
-            .and(warp::get())
-            .map(move || isos.join("\n"))
+        warp::path::end().and(warp::get()).and_then(rumd::list_umds)
     }
 
     /// HEAD /<umd_name:string>
     pub fn umd_info() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path::param()
             .and(warp::head())
-            .map(|umd_name: String| {
-                log::debug!("info UMD: path={}", umd_name);
-
-                Response::builder()
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Type", "application/octet-stream")
-                    .header("Content-Length", "1646002176")
-                    .body(hyper::Body::empty())
-            })
+            .and_then(rumd::info_umd)
     }
 
     /// GET /<umd_name:string>
     pub fn umd_read() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        let range_header = warp::header::<Range>("range");
-        warp::path::param().and(warp::get()).and(range_header).map(
-            |umd_name: String, range: Range| {
-                log::debug!(
-                    "Read UMD: path={} range=bytes {}-{}",
-                    umd_name,
-                    range.start,
-                    range.end
-                );
+        let range_header = warp::header::<rumd::Range>("range");
+        warp::path::param()
+            .and(warp::get())
+            .and(range_header)
+            .and_then(rumd::read_umd)
+    }
+}
 
-                Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Type", "application/octet-stream")
-                    .header(
-                        "Content-Range",
-                        format!("bytes {}-{}/{}", range.start, range.end, 1646002176),
-                    )
-                    .body(hyper::Body::empty())
-            },
-        )
+mod rumd {
+    use std::num::ParseIntError;
+    use std::str::FromStr;
+
+    use warp::http::{Response, StatusCode};
+    use warp::hyper;
+
+    pub async fn list_umds() -> Result<impl warp::Reply, warp::Rejection> {
+        let isos = vec![
+            "/",
+            "/Crisis%20Core%20-%20Final%20Fantasy%20VII%20(USA).iso",
+            "/Metal_Gear_Solid_Peace_Walker_USA_PSP-pSyPSP.iso",
+            "/Monster%20Hunter%20Freedom%20Unite%20(USA)%20(En,Fr,De,Es,It).iso",
+        ];
+        Ok(isos.join("\n"))
+    }
+
+    pub async fn info_umd(umd_name: String) -> Result<impl warp::Reply, warp::Rejection> {
+        log::debug!("info UMD: path={}", umd_name);
+
+        let resp = Response::builder()
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", "1646002176")
+            .body(hyper::Body::empty());
+        Ok(resp)
+    }
+
+    pub async fn read_umd(
+        umd_name: String,
+        range: Range,
+    ) -> Result<impl warp::Reply, warp::Rejection> {
+        log::debug!(
+            "Read UMD: path={} range=bytes {}-{}",
+            umd_name,
+            range.start,
+            range.end
+        );
+
+        let resp = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Type", "application/octet-stream")
+            .header(
+                "Content-Range",
+                format!("bytes {}-{}/{}", range.start, range.end, 1646002176),
+            )
+            .body(hyper::Body::empty());
+
+        Ok(resp)
     }
 
     #[derive(Debug, PartialEq)]
-    struct Range {
+    pub struct Range {
         start: i64,
         end: i64,
     }
@@ -139,14 +162,12 @@ mod filters {
     }
 }
 
-mod rumd {}
-
 #[cfg(test)]
 mod tests {
+    use super::filters;
+
     use warp::http::StatusCode;
     use warp::test::request;
-
-    use super::filters;
 
     #[tokio::test]
     async fn test_list() {
