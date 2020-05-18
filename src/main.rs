@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
@@ -12,6 +14,13 @@ const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ');
 const RUMD_LISTENING_PORT: u16 = 41041;
 const RUMD_VERSION: &str = "rumd v0.1.0";
 
+#[derive(Clone, Debug)]
+struct UMD {
+    path: PathBuf,
+}
+
+type UMDIndex<'a> = Arc<HashMap<String, UMD>>;
+
 #[tokio::main]
 async fn main() {
     if env::var_os("RUST_LOG").is_none() {
@@ -21,23 +30,42 @@ async fn main() {
     }
     pretty_env_logger::init();
 
+    let mut umd_index = HashMap::<String, UMD>::new();
+
     let mut builder = TypesBuilder::new();
     builder.add("iso", "*.iso").unwrap();
     builder.select("iso");
     let matcher = builder.build().unwrap();
 
-    for result in WalkBuilder::new(ROOT_ISO_PATH).types(matcher).build() {
+    for result in WalkBuilder::new(ROOT_ISO_PATH)
+        .types(matcher)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build()
+    {
         match result {
             Ok(entry) => {
-                let path: &Path = entry.path().strip_prefix(ROOT_ISO_PATH).unwrap();
-                println!("/{}", utf8_percent_encode(path.to_str().unwrap(), FRAGMENT));
+                let path: PathBuf = entry.into_path();
+                if path.is_dir() {
+                    continue;
+                }
+                if let Some(filename) = path.file_name() {
+                    let filename: &str = filename.to_str().expect("Something weird happened");
+                    let key: String = utf8_percent_encode(filename, FRAGMENT).to_string();
+                    let umd = UMD { path: path };
+                    umd_index.insert(key, umd);
+                }
             }
             Err(err) => println!("ERROR: {}", err),
         }
     }
 
+    for (key, umd) in &umd_index {
+        println!("{}: {:?}", key, umd);
+    }
+
     // Must Have
-    // TODO(meteorfox): Build KV "database" of flat ISO filenames map to their entry
     // TODO(meteorfox): Each entry contains file length info and file-system path
     // TODO(meteorfox): When reading a range of bytes, look up in KV database, check
     //                  range within limits, open file and read bytes, close file then
